@@ -43,7 +43,7 @@
     <h2>1. Anmeldung an der Nextcloud</h2>
     <label for="url">Nextcloud-Adresse</label>
     <input id="url" type="url" placeholder="https://nx103308.your-storageshare.de" autocomplete="url" autocapitalize="off">
-    <label for="nutzer">Benutzername</label>
+    <label for="nutzer">Benutzername oder E-Mail-Adresse</label>
     <input id="nutzer" autocomplete="username" autocapitalize="off" autocorrect="off">
     <label for="pw">App-Passwort</label>
     <input id="pw" type="password" autocomplete="current-password">
@@ -54,6 +54,7 @@
   <section class="karte versteckt" id="ordnerwahl">
     <h2>2. Ordner „Datenbank Buchhaltung“ wählen</h2>
     <div class="klein">Tippen Sie sich durch Ihre Ordner bis zu dem Ordner, in dem <b>_daten</b> liegt.</div>
+    <div class="klein" id="kennung"></div>
     <div class="pfad" id="pfad">/</div>
     <ul class="ordner" id="liste"></ul>
     <button id="waehlen">Diesen Ordner testen</button>
@@ -110,10 +111,14 @@
     const url = $('url').value.trim().replace(/\/+$/, '');
     const nutzer = $('nutzer').value.trim(), pw = $('pw').value.trim();
     if (!(/^https:\/\//.test(url) || /^http:\/\/localhost(:\d+)?$/.test(url)) || !nutzer || !pw) { alert('Bitte Adresse (mit https://), Benutzername und App-Passwort eintragen.'); return; }
-    basis = url + '/remote.php/dav/files/' + encodeURIComponent(nutzer) + '/';
     auth = 'Basic ' + btoa(unescape(encodeURIComponent(nutzer + ':' + pw)));
     $('verbinden').disabled = true; $('verbinden').textContent = 'Verbinde …';
     try {
+      // Anmeldename (z. B. E-Mail-Adresse) und interne Benutzerkennung können verschieden sein:
+      // die Kennung für den Dateipfad fragt die Seite bei der Nextcloud ab.
+      const uid = await benutzerKennung(url);
+      basis = url + '/remote.php/dav/files/' + encodeURIComponent(uid || nutzer) + '/';
+      $('kennung').textContent = uid ? 'Angemeldet als ' + nutzer + (uid !== nutzer ? ' (Nextcloud-Kennung: ' + uid + ')' : '') : '';
       pfad = [];
       await zeigeOrdner();
       $('ordnerwahl').classList.remove('versteckt');
@@ -122,6 +127,19 @@
       alert(fehlerText(e));
     } finally { $('verbinden').disabled = false; $('verbinden').textContent = 'Verbinden'; }
   };
+
+  async function benutzerKennung(url) {
+    const r = await fetch(url + '/remote.php/dav/', { method: 'PROPFIND', cache: 'no-store',
+      headers: { Authorization: auth, Depth: '0', 'Content-Type': 'application/xml; charset=utf-8' },
+      body: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>' });
+    if (r.status === 401) throw new Error('Anmeldung abgelehnt (401): Benutzername oder App-Passwort falsch.');
+    if (r.status !== 207) return '';
+    const xml = new DOMParser().parseFromString(await r.text(), 'application/xml');
+    const cup = xml.getElementsByTagNameNS('DAV:', 'current-user-principal')[0];
+    const href = cup && cup.getElementsByTagNameNS('DAV:', 'href')[0];
+    const m = href && href.textContent.match(/principals\/users\/([^/]+)\/?$/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
 
   function fehlerText(e) {
     if (e && e.name === 'TypeError') return 'Keine Verbindung zur Nextcloud möglich.\n\nHäufigste Ursache: Diese Seite ist in WebAppPassword noch nicht freigeschaltet (Adresse „' + location.origin + '“ unter „Erlaubte Origins“ eintragen). Sonst: Nextcloud-Adresse prüfen.\n\n(' + e.message + ')';
