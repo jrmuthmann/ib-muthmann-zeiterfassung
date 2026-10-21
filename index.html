@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Verbindungstest – Stunden</title>
+<style>
+  :root { --akzent:#1f4e79; --gruen:#2e7d4f; --gruen-bg:#e6f2ea; --rot:#b3261e; --rot-bg:#fbe9e7; --gelb-bg:#fdf3d8; --linie:#cfcdc6; --text2:#5c5b56; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#f4f4f2; color:#1d1d1b; font-size:16px; }
+  header { background:var(--akzent); color:#fff; padding: calc(14px + env(safe-area-inset-top)) 16px 14px; font-weight:600; font-size:18px; }
+  main { padding:16px; max-width:560px; margin:0 auto; }
+  .karte { background:#fff; border:1px solid #e2e1dc; border-radius:12px; padding:14px; margin-bottom:14px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  label { display:block; font-size:13px; color:var(--text2); margin:10px 0 4px; }
+  input { width:100%; font:inherit; padding:11px 12px; border:1px solid var(--linie); border-radius:9px; background:#fff; }
+  button { font:inherit; font-weight:600; border:0; border-radius:10px; padding:13px 16px; background:var(--akzent); color:#fff; width:100%; margin-top:14px; }
+  button.zweit { background:#e8eef5; color:var(--akzent); }
+  button:disabled { opacity:.5; }
+  .klein { font-size:13px; color:var(--text2); }
+  ul.ordner { list-style:none; padding:0; margin:8px 0 0; border:1px solid #e2e1dc; border-radius:9px; overflow:hidden; }
+  ul.ordner li { padding:12px; border-bottom:1px solid #eee; display:flex; gap:8px; align-items:center; }
+  ul.ordner li:last-child { border-bottom:0; }
+  ul.ordner li.zurueck { color:var(--akzent); font-weight:600; }
+  .pfad { font-size:13px; background:#f4f4f2; border-radius:6px; padding:6px 8px; word-break:break-all; margin-top:6px; }
+  .schritt { display:flex; gap:10px; padding:9px 0; border-bottom:1px solid #eee; align-items:flex-start; }
+  .schritt:last-child { border-bottom:0; }
+  .icon { width:24px; height:24px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; background:#eee; color:#888; }
+  .ok .icon { background:var(--gruen-bg); color:var(--gruen); }
+  .fehler .icon { background:var(--rot-bg); color:var(--rot); }
+  .laeuft .icon { background:var(--gelb-bg); color:#8a6100; }
+  .schritt small { display:block; color:var(--text2); margin-top:2px; word-break:break-word; }
+  .ergebnis { border-radius:10px; padding:12px; margin-top:12px; font-weight:600; overflow-wrap:anywhere; }
+  .ergebnis.ok { background:var(--gruen-bg); color:var(--gruen); }
+  .ergebnis.fehler { background:var(--rot-bg); color:var(--rot); }
+  .versteckt { display:none; }
+</style>
+</head>
+<body>
+<header>Stunden-App · Verbindungstest</header>
+<main>
+  <section class="karte" id="anmeldung">
+    <h2>1. Anmeldung an der Nextcloud</h2>
+    <label for="url">Nextcloud-Adresse</label>
+    <input id="url" type="url" placeholder="https://nx103308.your-storageshare.de" autocomplete="url" autocapitalize="off">
+    <label for="nutzer">Benutzername</label>
+    <input id="nutzer" autocomplete="username" autocapitalize="off" autocorrect="off">
+    <label for="pw">App-Passwort</label>
+    <input id="pw" type="password" autocomplete="current-password">
+    <p class="klein">App-Passwort: Nextcloud › Persönliche Einstellungen › Sicherheit › Namen eingeben (z. B. „Handy Test“) › „Neues App-Passwort erstellen“. Nach dem Test dort wieder löschen.</p>
+    <button id="verbinden">Verbinden</button>
+  </section>
+
+  <section class="karte versteckt" id="ordnerwahl">
+    <h2>2. Ordner „Datenbank Buchhaltung“ wählen</h2>
+    <div class="klein">Tippen Sie sich durch Ihre Ordner bis zu dem Ordner, in dem <b>_daten</b> liegt.</div>
+    <div class="pfad" id="pfad">/</div>
+    <ul class="ordner" id="liste"></ul>
+    <button id="waehlen">Diesen Ordner testen</button>
+  </section>
+
+  <section class="karte versteckt" id="test">
+    <h2>3. Test</h2>
+    <div id="schritte"></div>
+    <div id="ergebnis"></div>
+    <button class="zweit" id="nochmal">Erneut testen</button>
+  </section>
+
+  <p class="klein">Diese Testseite speichert nichts dauerhaft. Sie liest Ordner und Projekte und legt im Ordner <b>_signal</b> kurz eine Testdatei an, die sofort wieder gelöscht wird.</p>
+</main>
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  let basis = '', auth = '', pfad = [];
+
+  const kodiere = teile => teile.map(encodeURIComponent).join('/');
+  const davUrl = teile => basis + (teile.length ? kodiere(teile) : '') ;
+
+  async function dav(methode, teile, opts) {
+    opts = opts || {};
+    const headers = Object.assign({ Authorization: auth }, opts.headers || {});
+    const url = davUrl(teile) + (opts.ordner && teile.length ? '/' : '');
+    return fetch(url, { method: methode, headers, body: opts.body, cache: 'no-store' });
+  }
+
+  const PROPFIND_BODY = '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getlastmodified/></d:prop></d:propfind>';
+  async function liste(teile) {
+    const r = await dav('PROPFIND', teile, { ordner: true, headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' }, body: PROPFIND_BODY });
+    if (r.status === 401) throw new Error('Anmeldung abgelehnt (401): Benutzername oder App-Passwort falsch.');
+    if (r.status === 404) throw new Error('Ordner nicht gefunden (404).');
+    if (r.status !== 207) throw new Error('Unerwartete Antwort ' + r.status + ' beim Lesen des Ordners.');
+    const xml = new DOMParser().parseFromString(await r.text(), 'application/xml');
+    const NS = 'DAV:';
+    const eigen = new URL(davUrl(teile) + (teile.length ? '/' : ''), location.href).pathname.replace(/\/+$/, '');
+    const out = [];
+    for (const resp of Array.from(xml.getElementsByTagNameNS(NS, 'response'))) {
+      const href = resp.getElementsByTagNameNS(NS, 'href')[0].textContent;
+      const p = decodeURIComponent(new URL(href, location.href).pathname).replace(/\/+$/, '');
+      if (p === decodeURIComponent(eigen)) continue;
+      const name = p.split('/').pop();
+      const ordner = resp.getElementsByTagNameNS(NS, 'collection').length > 0;
+      out.push({ name, ordner });
+    }
+    return out.sort((a, b) => (b.ordner - a.ordner) || a.name.localeCompare(b.name, 'de'));
+  }
+
+  // ---------------------------------------------------------------- Anmeldung
+  $('verbinden').onclick = async () => {
+    const url = $('url').value.trim().replace(/\/+$/, '');
+    const nutzer = $('nutzer').value.trim(), pw = $('pw').value.trim();
+    if (!(/^https:\/\//.test(url) || /^http:\/\/localhost(:\d+)?$/.test(url)) || !nutzer || !pw) { alert('Bitte Adresse (mit https://), Benutzername und App-Passwort eintragen.'); return; }
+    basis = url + '/remote.php/dav/files/' + encodeURIComponent(nutzer) + '/';
+    auth = 'Basic ' + btoa(unescape(encodeURIComponent(nutzer + ':' + pw)));
+    $('verbinden').disabled = true; $('verbinden').textContent = 'Verbinde …';
+    try {
+      pfad = [];
+      await zeigeOrdner();
+      $('ordnerwahl').classList.remove('versteckt');
+      $('ordnerwahl').scrollIntoView({ behavior: 'smooth' });
+    } catch (e) {
+      alert(fehlerText(e));
+    } finally { $('verbinden').disabled = false; $('verbinden').textContent = 'Verbinden'; }
+  };
+
+  function fehlerText(e) {
+    if (e && e.name === 'TypeError') return 'Keine Verbindung zur Nextcloud möglich.\n\nHäufigste Ursache: Diese Seite ist in WebAppPassword noch nicht freigeschaltet (Adresse „' + location.origin + '“ unter „Erlaubte Origins“ eintragen). Sonst: Nextcloud-Adresse prüfen.\n\n(' + e.message + ')';
+    return e.message || String(e);
+  }
+
+  async function zeigeOrdner() {
+    const eintraege = await liste(pfad);
+    $('pfad').textContent = '/' + pfad.join('/');
+    const ul = $('liste'); ul.innerHTML = '';
+    if (pfad.length) { const li = document.createElement('li'); li.className = 'zurueck'; li.textContent = '‹ zurück'; li.onclick = async () => { pfad.pop(); await zeigeOrdner(); }; ul.appendChild(li); }
+    const ordner = eintraege.filter(x => x.ordner);
+    const hatDaten = ordner.some(x => x.name === '_daten');
+    ordner.forEach(x => { const li = document.createElement('li'); li.textContent = '📁 ' + x.name; li.onclick = async () => { pfad.push(x.name); try { await zeigeOrdner(); } catch (e) { pfad.pop(); alert(fehlerText(e)); } }; ul.appendChild(li); });
+    if (!ordner.length) { const li = document.createElement('li'); li.className = 'klein'; li.textContent = '(keine Unterordner)'; ul.appendChild(li); }
+    $('waehlen').disabled = !hatDaten;
+    $('waehlen').textContent = hatDaten ? 'Diesen Ordner testen' : 'Ordner mit „_daten“ öffnen …';
+  }
+
+  // ---------------------------------------------------------------- Test
+  $('waehlen').onclick = () => test();
+  $('nochmal').onclick = () => test();
+
+  async function test() {
+    $('test').classList.remove('versteckt'); $('ergebnis').innerHTML = ''; $('schritte').innerHTML = '';
+    $('test').scrollIntoView({ behavior: 'smooth' });
+    const schritt = text => {
+      const d = document.createElement('div'); d.className = 'schritt laeuft';
+      d.innerHTML = '<div class="icon">…</div><div><span></span><small></small></div>';
+      d.querySelector('span').textContent = text; $('schritte').appendChild(d);
+      return { ok: info => { d.className = 'schritt ok'; d.querySelector('.icon').textContent = '✓'; d.querySelector('small').textContent = info || ''; },
+               fehler: info => { d.className = 'schritt fehler'; d.querySelector('.icon').textContent = '✕'; d.querySelector('small').textContent = info || ''; } };
+    };
+    const ende = (ok, text) => { $('ergebnis').innerHTML = '<div class="ergebnis ' + (ok ? 'ok' : 'fehler') + '"></div>'; $('ergebnis').firstChild.textContent = text; };
+    let s;
+    try {
+      s = schritt('Projekte lesen');
+      const projDateien = (await liste(pfad.concat(['_daten', 'projekte']))).filter(x => !x.ordner && x.name.endsWith('.json'));
+      let namen = [];
+      for (const f of projDateien.slice(0, 50)) {
+        const r = await dav('GET', pfad.concat(['_daten', 'projekte', f.name]));
+        if (r.ok) { try { const p = await r.json(); if (p && p.status !== 'abgeschlossen') namen.push((p.nummer ? p.nummer + ' ' : '') + (p.name || '')); } catch (e) { /* ignorieren */ } }
+      }
+      s.ok(projDateien.length + ' Projekte gefunden' + (namen.length ? ', laufend z. B.: ' + namen.slice(0, 3).join(' · ') : ''));
+
+      s = schritt('Mitarbeiter lesen');
+      const ma = (await liste(pfad.concat(['_daten', 'mitarbeiter']))).filter(x => x.name.endsWith('.json'));
+      s.ok(ma.length + ' Mitarbeiter');
+
+      s = schritt('Testdatei schreiben');
+      const name = '_handytest-' + Date.now() + '.json';
+      const ziel = pfad.concat(['_signal', name]);
+      const inhalt = JSON.stringify({ test: true, ts: new Date().toISOString(), geraet: navigator.userAgent });
+      let r = await dav('PUT', ziel, { headers: { 'Content-Type': 'application/json' }, body: inhalt });
+      if (!(r.status === 201 || r.status === 204)) throw new Error('Schreiben fehlgeschlagen (' + r.status + '). Hat dieses Konto Bearbeiten-Rechte für den Ordner?');
+      s.ok('in _signal angelegt');
+
+      s = schritt('Testdatei zurücklesen');
+      r = await dav('GET', ziel);
+      const zurueck = await r.text();
+      if (!r.ok || zurueck !== inhalt) throw new Error('Gelesener Inhalt stimmt nicht (' + r.status + ').');
+      s.ok('Inhalt stimmt');
+
+      s = schritt('Testdatei löschen');
+      r = await dav('DELETE', ziel);
+      if (!(r.status === 204 || r.status === 200)) throw new Error('Löschen fehlgeschlagen (' + r.status + ').');
+      s.ok('aufgeräumt');
+
+      ende(true, '✓ Alles in Ordnung – die Stunden-App kann mit Ihrer Nextcloud arbeiten. Ordner: /' + pfad.join('/'));
+    } catch (e) {
+      if (s) s.fehler(fehlerText(e));
+      ende(false, 'Test nicht bestanden – bitte einen Screenshot dieser Seite schicken.');
+    }
+  }
+})();
+</script>
+</body>
+</html>
