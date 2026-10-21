@@ -82,6 +82,19 @@
   #toast div.fehler { background:var(--rot); }
   .lade { text-align:center; padding:40px 10px; color:var(--text2); }
   footer.ver { text-align:center; font-size:11.5px; color:var(--text3); margin-top:24px; }
+
+  /* Uhr zum Auswählen der Zeit (wie Android-Wecker) */
+  input.uhrzeit { cursor:pointer; font-variant-numeric:tabular-nums; caret-color:transparent; }
+  .uhrwahl { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; }
+  .uhrwahl .box { background:#fff; border-radius:22px; width:320px; max-width:calc(100vw - 24px); padding:18px 18px 12px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+  .uhrwahl .titel { font-size:13px; color:var(--text2); margin-bottom:8px; }
+  .uhrwahl .anzeige { display:flex; align-items:center; justify-content:center; gap:4px; margin-bottom:14px; }
+  .uhrwahl .anzeige button { font:inherit; font-size:46px; font-weight:500; line-height:1; border:0; border-radius:12px; padding:8px 12px; background:#eceae5; color:#1d1d1b; font-variant-numeric:tabular-nums; }
+  .uhrwahl .anzeige button.an { background:var(--akzent-bg); color:var(--akzent); }
+  .uhrwahl .anzeige span { font-size:46px; }
+  .uhrwahl svg { display:block; margin:0 auto; touch-action:none; user-select:none; -webkit-user-select:none; }
+  .uhrwahl .knoepfe { display:flex; justify-content:space-between; align-items:center; margin-top:10px; }
+  .uhrwahl .knoepfe button { font:inherit; font-weight:600; border:0; background:none; color:var(--akzent); padding:10px 12px; font-size:15px; border-radius:8px; }
 </style>
 </head>
 <body>
@@ -96,7 +109,7 @@
 <script>
 (function () {
   'use strict';
-  const VERSION = '1.0.1';
+  const VERSION = '1.1.0';
   const STANDARD_URL = 'https://nx103308.your-storageshare.de';
   const TAGE_LISTE = 62;          // so weit zurück werden eigene Einträge geladen
   const MAX_LAUF_STD = 10;        // länger laufende Uhren: nachfragen
@@ -323,7 +336,7 @@
     return new Promise(resolve => {
       const seit = new Date(s.laeuft.seit);
       const ov = blatt('Uhr läuft noch', '<p>Die Uhr für <b>' + h(projektName(s.projektId)) + '</b> läuft seit <b>' + fmtTag(isoTag(seit)) + ' ' + hhmm(seit) + ' Uhr</b>.</p>' +
-        '<label class="f">Wann haben Sie aufgehört? (' + fmtTag(isoTag(seit)) + ')</label><input type="time" id="vEnde" value="' + (isoTag(seit) === heute() ? hhmm(new Date()) : '') + '">' +
+        '<label class="f">Wann haben Sie aufgehört? (' + fmtTag(isoTag(seit)) + ')</label><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Ende der Arbeit" id="vEnde" value="' + (isoTag(seit) === heute() ? hhmm(new Date()) : '') + '">' +
         '<button class="haupt" id="vOk">Übernehmen</button><button class="zweit" id="vLaeuft">Läuft wirklich noch</button>');
       ov.querySelector('#vOk').onclick = async () => {
         const v = ov.querySelector('#vEnde').value;
@@ -376,7 +389,7 @@
       box.innerHTML = sortiert.map(({ z, i }, k) => {
         let pause = '';
         if (k > 0) { const l = zeitMin(z.von) - zeitMin(sortiert[k - 1].z.bis); if (l > 0) pause = '<div class="pausehinweis">Pause ' + fmtMin(l) + '</div>'; }
-        return pause + '<div class="abschnitt"><input type="time" data-i="' + i + '" data-k="von" value="' + h(z.von) + '"><span>–</span><input type="time" data-i="' + i + '" data-k="bis" value="' + h(z.bis) + '"><button data-del="' + i + '" aria-label="Abschnitt entfernen">✕</button></div>';
+        return pause + '<div class="abschnitt"><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Beginn" data-i="' + i + '" data-k="von" value="' + h(z.von) + '"><span>–</span><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Ende" data-i="' + i + '" data-k="bis" value="' + h(z.bis) + '"><button data-del="' + i + '" aria-label="Abschnitt entfernen">✕</button></div>';
       }).join('') || '<div class="klein">keine – nur Dauer</div>';
       box.querySelectorAll('input').forEach(inp => inp.onchange = () => { zeiten[+inp.dataset.i][inp.dataset.k] = inp.value; aktualisiere(); zeichne(); });
       box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { zeiten.splice(+b.dataset.del, 1); aktualisiere(); zeichne(); });
@@ -410,6 +423,84 @@
       try { await loesche(s); ov.remove(); toast('Gelöscht'); render(); } catch (e) { toast(e.message, true); }
     };
   }
+
+  // ---------------------------------------------------------------- Uhrzeit-Auswahl (Zifferblatt: erst Stunde, dann Minute)
+  function uhrWaehlen(input) {
+    const start = zeitMin(input.value);
+    const jetzt = new Date();
+    let std = !isNaN(start) ? Math.floor(start / 60) : jetzt.getHours();
+    let min = !isNaN(start) ? start % 60 : Math.round(jetzt.getMinutes() / 5) * 5 % 60;
+    let modus = 'std';
+    const titel = input.dataset.titel || 'Uhrzeit';
+    const ov = document.createElement('div'); ov.className = 'uhrwahl';
+    ov.innerHTML = '<div class="box"><div class="titel"></div><div class="anzeige"><button data-m="std"></button><span>:</span><button data-m="min"></button></div>' +
+      '<svg width="260" height="260" viewBox="0 0 260 260"></svg>' +
+      '<div class="knoepfe"><button data-a="jetzt">Jetzt</button><span><button data-a="ab">Abbrechen</button><button data-a="ok">OK</button></span></div></div>';
+    ov.querySelector('.titel').textContent = String(titel).trim() || 'Uhrzeit';
+    const svg = ov.querySelector('svg');
+    const C = 130, R_AUSSEN = 104, R_INNEN = 68;
+    const pos = (i, r) => { const w = (i / 12) * 2 * Math.PI - Math.PI / 2; return [C + r * Math.cos(w), C + r * Math.sin(w)]; };
+    function zeichne() {
+      ov.querySelector('[data-m="std"]').textContent = pad(std);
+      ov.querySelector('[data-m="min"]').textContent = pad(min);
+      ov.querySelectorAll('.anzeige button').forEach(b => b.classList.toggle('an', b.dataset.m === modus));
+      let x = '<circle cx="' + C + '" cy="' + C + '" r="126" fill="#eceae5"/>';
+      let zeiger;
+      if (modus === 'std') {
+        const innen = std === 0 || std > 12;
+        zeiger = pos(std % 12, innen ? R_INNEN : R_AUSSEN);
+        x += '<line x1="' + C + '" y1="' + C + '" x2="' + zeiger[0] + '" y2="' + zeiger[1] + '" stroke="#1f4e79" stroke-width="2"/><circle cx="' + C + '" cy="' + C + '" r="4" fill="#1f4e79"/><circle cx="' + zeiger[0] + '" cy="' + zeiger[1] + '" r="19" fill="#1f4e79"/>';
+        for (let i = 0; i < 12; i++) {
+          const a = i === 0 ? 12 : i, b = i === 0 ? 0 : i + 12;
+          const [ax, ay] = pos(i, R_AUSSEN), [bx, by] = pos(i, R_INNEN);
+          x += '<text x="' + ax + '" y="' + ay + '" text-anchor="middle" dominant-baseline="central" font-size="17" fill="' + (std === a ? '#fff' : '#1d1d1b') + '">' + a + '</text>';
+          x += '<text x="' + bx + '" y="' + by + '" text-anchor="middle" dominant-baseline="central" font-size="14" fill="' + (std === b ? '#fff' : '#5c5b56') + '">' + pad(b) + '</text>';
+        }
+      } else {
+        zeiger = pos(min / 5, R_AUSSEN);
+        x += '<line x1="' + C + '" y1="' + C + '" x2="' + zeiger[0] + '" y2="' + zeiger[1] + '" stroke="#1f4e79" stroke-width="2"/><circle cx="' + C + '" cy="' + C + '" r="4" fill="#1f4e79"/><circle cx="' + zeiger[0] + '" cy="' + zeiger[1] + '" r="19" fill="#1f4e79"/>';
+        if (min % 5) x += '<circle cx="' + zeiger[0] + '" cy="' + zeiger[1] + '" r="3" fill="#fff"/>';
+        for (let i = 0; i < 12; i++) {
+          const [ax, ay] = pos(i, R_AUSSEN);
+          x += '<text x="' + ax + '" y="' + ay + '" text-anchor="middle" dominant-baseline="central" font-size="17" fill="' + (min === i * 5 ? '#fff' : '#1d1d1b') + '">' + pad(i * 5) + '</text>';
+        }
+      }
+      svg.innerHTML = x;
+    }
+    function waehle(e) {
+      const r = svg.getBoundingClientRect();
+      const dx = (e.clientX - r.left) * (260 / r.width) - C, dy = (e.clientY - r.top) * (260 / r.height) - C;
+      let w = Math.atan2(dy, dx) + Math.PI / 2; if (w < 0) w += 2 * Math.PI;
+      const abst = Math.sqrt(dx * dx + dy * dy);
+      if (modus === 'std') {
+        const i = Math.round(w / (2 * Math.PI) * 12) % 12;
+        const innen = abst < (R_AUSSEN + R_INNEN) / 2;
+        std = innen ? (i === 0 ? 0 : i + 12) : (i === 0 ? 12 : i);
+      } else {
+        min = (Math.round(w / (2 * Math.PI) * 12) % 12) * 5;   // 5-Minuten-Schritte
+      }
+      zeichne();
+    }
+    let gedrueckt = false;
+    svg.addEventListener('pointerdown', e => { gedrueckt = true; try { svg.setPointerCapture(e.pointerId); } catch (x) { /* egal */ } waehle(e); });
+    svg.addEventListener('pointermove', e => { if (gedrueckt) waehle(e); });
+    svg.addEventListener('pointerup', e => { if (!gedrueckt) return; gedrueckt = false; waehle(e); if (modus === 'std') { modus = 'min'; setTimeout(zeichne, 180); } });
+    ov.querySelectorAll('.anzeige button').forEach(b => b.onclick = () => { modus = b.dataset.m; zeichne(); });
+    const fertig = wert => {
+      ov.remove();
+      if (wert === undefined) return;
+      input.value = wert;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    ov.querySelector('[data-a="ok"]').onclick = () => fertig(pad(std) + ':' + pad(min));
+    ov.querySelector('[data-a="ab"]').onclick = () => fertig();
+    ov.querySelector('[data-a="jetzt"]').onclick = () => { const d = new Date(); std = d.getHours(); min = d.getMinutes(); modus = 'min'; zeichne(); };
+    ov.addEventListener('click', e => { if (e.target === ov) fertig(); });
+    zeichne();
+    document.body.appendChild(ov);
+  }
+  document.addEventListener('click', e => { const i = e.target.closest && e.target.closest('input.uhrzeit'); if (i) { e.preventDefault(); i.blur(); uhrWaehlen(i); } });
 
   // ---------------------------------------------------------------- Ansichten
   function renderZeiten() {
@@ -457,7 +548,7 @@
       '<div class="chips"><button class="chip' + (nachtragModus === 'dauer' ? ' an' : '') + '" data-modus="dauer">Dauer</button><button class="chip' + (nachtragModus === 'zeit' ? ' an' : '') + '" data-modus="zeit">von – bis</button></div>' +
       (nachtragModus === 'dauer'
         ? '<label class="f">Dauer (h:mm)</label><input id="nStd" inputmode="decimal" placeholder="z. B. 2:30"><div class="chips">' + ['0:30', '1:00', '2:00', '3:00', '4:00', '8:00'].map(x => '<button class="chip" data-dauer="' + x + '">' + x + '</button>').join('') + '</div>'
-        : '<div class="zwei"><div><label class="f">von</label><input type="time" id="nVon"></div><div><label class="f">bis</label><input type="time" id="nBis"></div></div>' +
+        : '<div class="zwei"><div><label class="f">von</label><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Beginn" id="nVon"></div><div><label class="f">bis</label><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Ende" id="nBis"></div></div>' +
           '<div class="zwei"><div><label class="f">Pause (Min.)</label><input id="nPause" inputmode="numeric" placeholder="0"></div><div><label class="f">Dauer</label><input id="nSumme" disabled></div></div>') +
       '<label class="f">Beschreibung</label><textarea id="nBeschr" placeholder="Was wurde gemacht?"></textarea>' +
       '<label class="check">Ortstermin (Anfahrt)<input type="checkbox" id="nOrt"></label>' +
