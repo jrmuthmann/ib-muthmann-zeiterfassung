@@ -77,6 +77,9 @@
   .ov .blatt { background:var(--bg); width:100%; max-width:600px; max-height:92vh; overflow:auto; border-radius:16px 16px 0 0; padding:16px 16px calc(20px + env(safe-area-inset-bottom)); }
   .ov .blatt h2 { font-size:17px; display:flex; justify-content:space-between; align-items:center; }
   .ov .blatt h2 button { background:none; border:0; font-size:22px; color:var(--text3); }
+  #status { display:none; position:sticky; top:calc(50px + env(safe-area-inset-top)); z-index:4; padding:9px 16px; font-size:13.5px; text-align:center; }
+  #status.offline { background:var(--gelb-bg); color:var(--gelb); }
+  #status.konflikt { background:var(--rot-bg); color:var(--rot); font-weight:600; }
   #toast { position:fixed; left:14px; right:14px; top:calc(62px + env(safe-area-inset-top)); z-index:30; display:none; }
   #toast div { max-width:560px; margin:0 auto; border-radius:10px; padding:11px 14px; color:#fff; background:var(--gruen); font-size:14.5px; box-shadow:0 4px 14px rgba(0,0,0,.2); }
   #toast div.fehler { background:var(--rot); }
@@ -99,6 +102,7 @@
 </head>
 <body>
 <header><h1 id="titel">Zeiten</h1><span class="wer" id="wer"></span><button id="neuladen" title="Aktualisieren" aria-label="Aktualisieren">↻</button><button id="einst" title="Einstellungen" aria-label="Einstellungen">⚙</button></header>
+<div id="status"></div>
 <main id="main"><div class="lade">Lädt …</div></main>
 <nav class="tabs" id="tabs">
   <button data-tab="zeiten"><span>⏱</span>Zeiten</button>
@@ -109,7 +113,7 @@
 <script>
 (function () {
   'use strict';
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const STANDARD_URL = 'https://nx103308.your-storageshare.de';
   const TAGE_LISTE = 62;          // so weit zurück werden eigene Einträge geladen
   const MAX_LAUF_STD = 10;        // länger laufende Uhren: nachfragen
@@ -137,6 +141,7 @@
     const m = /^(\d{1,2}):(\d{1,2})$/.exec(x); if (m) return +m[2] < 60 ? r4(+m[1] + +m[2] / 60) : NaN;
     const n = parseFloat(x.replace(',', '.')); return /^\d+([.,]\d+)?$/.test(x) ? n : NaN;
   };
+  const pauseAus = v => { const x = parseStd(v); return x > 0 ? Math.round(x * 60) : 0; };
   const pausenMinuten = s => {
     const z = (s.zeiten || []).filter(x => !isNaN(zeitMin(x.von)) && !isNaN(zeitMin(x.bis))).slice().sort((a, b) => zeitMin(a.von) - zeitMin(b.von));
     let p = +s.pauseMin || 0;
@@ -241,7 +246,7 @@
       }));
     }
   }
-  let ladend = false, geladenAm = 0;
+  let ladend = false, geladenAm = ls.get('geladenAm', 0);
   async function ladeAlles(still) {
     if (ladend) return; ladend = true;
     try {
@@ -251,8 +256,10 @@
       // nur jüngere Dateien (nach Änderungszeit) und laufende Uhren laden
       await ladeTyp('stunden', (f, alt) => !f.lm || f.lm >= grenze || (alt && alt.rec && alt.rec.laeuft));
       for (const id of Object.keys(cache.stunden)) { const r = cache.stunden[id].rec; if (!r || r.mitarbeiterId !== cfg.maId) delete cache.stunden[id]; }
-      speichereCache(); geladenAm = Date.now();
+      warteUeberlagern();
+      speichereCache(); geladenAm = Date.now(); offline = false; ls.set('geladenAm', geladenAm);
     } catch (e) {
+      if (e.offline) { offline = true; warteUeberlagern(); aktualisiereStatus(); throw e; }
       if (!still) toast(e.message, true);
       if (e.auth) { cfg.pw = ''; ls.set('cfg', cfg); }
       throw e;
@@ -274,38 +281,123 @@
         letzteAenderung: aenderungen[aenderungen.length - 1].ts, aenderungen });
     } catch (e) { /* Signal ist nur ein Beschleuniger */ }
   }
-  /** Speichert einen Stundeneintrag. alt = gelesene Fassung (Konfliktprüfung über rev) */
+  // ---------------------------------------------------------------- Warteschlange (offline)
+  // Jede Änderung wird sofort auf dem Handy übernommen und in die Warteschlange gelegt; die Warteschlange
+  // wird an die Nextcloud geschickt, sobald eine Verbindung besteht. Je Eintrag: { rec | null (löschen), basisRev (Stand der Nextcloud), ts, konflikt }
+  let warte = ls.get('warteschlange', {});
+  let offline = false, syncLaeuft = false, letzterSyncFehler = '';
+  const speichereWarte = () => ls.set('warteschlange', warte);
+  const anzahlWartend = () => Object.keys(warte).length;
+  const anzahlKonflikte = () => Object.values(warte).filter(x => x.konflikt).length;
+
+  /** Speichert einen Stundeneintrag (sofort auf dem Handy, dann an die Nextcloud). alt = Fassung, auf der die Änderung beruht */
   async function speichere(rec, alt) {
-    const pfad = datenPfad(['_daten', 'stunden', rec.id + '.json']);
-    const aktuell = await leseJson(pfad);
-    if (aktuell && alt && aktuell.rev !== alt.rev) {
-      cache.stunden[rec.id] = { rec: aktuell, lm: 0 }; speichereCache();
-      throw new Error('Dieser Eintrag wurde inzwischen an anderer Stelle geändert. Die aktuelle Fassung wurde geladen – bitte noch einmal.');
-    }
-    if (aktuell && abgerechnet(aktuell)) throw new Error('Dieser Eintrag ist bereits abgerechnet und kann nicht mehr geändert werden.');
-    if (!aktuell && alt) throw new Error('Dieser Eintrag wurde inzwischen gelöscht.');
+    if (alt && abgerechnet(alt)) throw new Error('Dieser Eintrag ist bereits abgerechnet und kann nicht mehr geändert werden.');
     const jetzt = new Date().toISOString();
+    const vorher = warte[rec.id];
     const neu = Object.assign({}, rec, {
-      rev: ((aktuell && aktuell.rev) || 0) + 1,
-      erstelltAm: (aktuell && aktuell.erstelltAm) || jetzt,
-      erstelltVon: (aktuell && aktuell.erstelltVon) || meinName() + ' (Handy)',
+      rev: ((alt && alt.rev) || 0) + 1,
+      erstelltAm: (alt && alt.erstelltAm) || rec.erstelltAm || jetzt,
+      erstelltVon: (alt && alt.erstelltVon) || rec.erstelltVon || meinName() + ' (Handy)',
       geaendertAm: jetzt, geaendertVon: meinName() + ' (Handy)'
     });
     if (!neu.laeuft) delete neu.laeuftAuf;
-    await schreibeJson(pfad, neu);
+    warte[neu.id] = { rec: neu, basisRev: vorher ? vorher.basisRev : (alt ? alt.rev : null), ts: jetzt };
+    speichereWarte();
     cache.stunden[neu.id] = { rec: neu, lm: Date.now() }; speichereCache();
-    signal('stunden', neu.id, neu.rev, aktuell ? 'aendern' : 'neu');
+    await synchronisiere(true);
     return neu;
   }
   async function loesche(rec) {
-    const pfad = datenPfad(['_daten', 'stunden', rec.id + '.json']);
-    const aktuell = await leseJson(pfad);
-    if (aktuell && abgerechnet(aktuell)) throw new Error('Bereits abgerechnet – Löschen nicht möglich.');
-    if (aktuell && aktuell.rev !== rec.rev) throw new Error('Inzwischen an anderer Stelle geändert – bitte aktualisieren.');
-    const r = await dav('DELETE', pfad);
-    if (!(r.status === 204 || r.status === 200 || r.status === 404)) throw new Error('Löschen fehlgeschlagen (' + r.status + ')');
+    if (abgerechnet(rec)) throw new Error('Bereits abgerechnet – Löschen nicht möglich.');
+    const vorher = warte[rec.id];
+    if (vorher && vorher.basisRev === null) delete warte[rec.id];   // nie hochgeladen: einfach verwerfen
+    else warte[rec.id] = { rec: null, basisRev: vorher ? vorher.basisRev : rec.rev, ts: new Date().toISOString() };
+    speichereWarte();
     delete cache.stunden[rec.id]; speichereCache();
-    signal('stunden', rec.id, rec.rev, 'loeschen');
+    await synchronisiere(true);
+  }
+  /** Warteschlange an die Nextcloud schicken. Konflikte (am PC geändert, gelöscht oder abgerechnet) werden nicht überschrieben. */
+  async function synchronisiere(still) {
+    if (syncLaeuft || !anzahlWartend() || !cfg.pw) { aktualisiereStatus(); return; }
+    syncLaeuft = true;
+    let neuerKonflikt = null;
+    try {
+      for (const id of Object.keys(warte).sort((x, y) => String(warte[x].ts).localeCompare(String(warte[y].ts)))) {
+        const e = warte[id];
+        if (!e || e.konflikt) continue;
+        const pfad = datenPfad(['_daten', 'stunden', id + '.json']);
+        const cur = await leseJson(pfad);
+        // eigener Schreibvorgang ist schon angekommen (z. B. Verbindung beim Bestätigen abgerissen)
+        if (cur && e.rec && cur.geaendertAm === e.rec.geaendertAm && cur.geaendertVon === e.rec.geaendertVon) {
+          delete warte[id]; speichereWarte(); cache.stunden[id] = { rec: cur, lm: Date.now() }; continue;
+        }
+        if (!cur && !e.rec && e.basisRev !== null) { delete warte[id]; speichereWarte(); continue; }   // schon gelöscht
+        const geaendert = e.basisRev === null ? !!cur : (!cur || cur.rev !== e.basisRev);
+        if ((cur && abgerechnet(cur)) || geaendert) {
+          e.konflikt = cur && abgerechnet(cur) ? 'abgerechnet' : (cur ? 'geaendert' : 'geloescht'); e.server = cur || null;
+          speichereWarte(); if (!neuerKonflikt) neuerKonflikt = id; continue;
+        }
+        if (e.rec) {
+          const out = Object.assign({}, e.rec, { rev: ((cur && cur.rev) || 0) + 1 });
+          if (cur) { out.erstelltAm = cur.erstelltAm || out.erstelltAm; out.erstelltVon = cur.erstelltVon || out.erstelltVon; }
+          await schreibeJson(pfad, out);
+          if (warte[id] === e) { delete warte[id]; cache.stunden[id] = { rec: out, lm: Date.now() }; }
+          else if (warte[id]) warte[id].basisRev = out.rev;   // während des Hochladens erneut geändert
+          speichereWarte(); speichereCache();
+          signal('stunden', id, out.rev, cur ? 'aendern' : 'neu');
+        } else {
+          const r = await dav('DELETE', pfad);
+          if (!(r.status === 204 || r.status === 200 || r.status === 404)) throw new Error('Löschen fehlgeschlagen (' + r.status + ')');
+          delete warte[id]; speichereWarte();
+          signal('stunden', id, e.basisRev, 'loeschen');
+        }
+      }
+      offline = false; letzterSyncFehler = '';
+    } catch (err) {
+      if (err.offline) offline = true;
+      else { letzterSyncFehler = err.message; if (!still) toast(err.message, true); }
+      if (err.auth) { cfg.pw = ''; ls.set('cfg', cfg); }
+    } finally { syncLaeuft = false; }
+    aktualisiereStatus();
+    if (neuerKonflikt) zeigeKonflikt(neuerKonflikt);
+  }
+  /** Konflikt: beide Fassungen zeigen, Nutzer entscheidet */
+  function zeigeKonflikt(id) {
+    const e = warte[id]; if (!e || !e.konflikt) return;
+    if (document.querySelector('.ov')) { if (!document.querySelector('.ov.konfliktblatt')) setTimeout(() => zeigeKonflikt(id), 400); return; }
+    const kurz = r => r ? '<b>' + h(fmtStd(r.stunden)) + ' h</b> · ' + h(fmtTag(r.datum)) + (zeitenText(r) ? ' · ' + h(zeitenText(r)) : '') + '<br>' + h(r.beschreibung || '–') : '<i>gelöscht</i>';
+    const grund = { geaendert: 'wurde inzwischen an anderer Stelle (z. B. am PC) geändert', geloescht: 'wurde inzwischen an anderer Stelle gelöscht', abgerechnet: 'ist inzwischen abgerechnet und kann nicht mehr geändert werden' }[e.konflikt];
+    const ref = e.rec || e.server || {};
+    const ov = blatt('Bitte entscheiden', '<p>Der Eintrag <b>' + h(projektName(ref.projektId)) + '</b> ' + grund + '.</p>' +
+      '<div class="karte"><div class="klein">Ihre Fassung auf dem Handy</div>' + kurz(e.rec) + '</div>' +
+      '<div class="karte"><div class="klein">Fassung in der Nextcloud</div>' + kurz(e.server) + '</div>' +
+      (e.konflikt !== 'abgerechnet' ? '<button class="haupt" id="kMein">Meine Fassung übernehmen</button>' : '') +
+      '<button class="zweit" id="kServer">' + (e.konflikt === 'abgerechnet' ? 'Verstanden – Fassung der Nextcloud behalten' : 'Fassung der Nextcloud übernehmen') + '</button>');
+    ov.classList.add('konfliktblatt');
+    if (ov.querySelector('#kMein')) ov.querySelector('#kMein').onclick = async () => {
+      e.basisRev = e.server ? e.server.rev : null; delete e.konflikt; delete e.server; speichereWarte(); ov.remove();
+      await synchronisiere(); render();
+    };
+    ov.querySelector('#kServer').onclick = async () => {
+      if (e.server) cache.stunden[id] = { rec: e.server, lm: Date.now() }; else delete cache.stunden[id];
+      delete warte[id]; speichereWarte(); speichereCache(); ov.remove(); render(); aktualisiereStatus();
+      const naechster = Object.keys(warte).find(k => warte[k].konflikt); if (naechster) zeigeKonflikt(naechster);
+    };
+  }
+  /** Lokale, noch nicht übertragene Änderungen über die geladenen Daten legen */
+  function warteUeberlagern() {
+    for (const [id, e] of Object.entries(warte)) { if (e.rec) cache.stunden[id] = { rec: e.rec, lm: Date.now() }; else delete cache.stunden[id]; }
+  }
+  function aktualisiereStatus() {
+    const el = $('status'); if (!el) return;
+    const n = anzahlWartend(), k = anzahlKonflikte();
+    let t = '', art = '';
+    if (k) { t = '⚠ ' + k + (k === 1 ? ' Eintrag braucht' : ' Einträge brauchen') + ' Ihre Entscheidung – antippen'; art = 'konflikt'; }
+    else if (offline && n) { t = '⏳ Offline – ' + n + (n === 1 ? ' Änderung wartet' : ' Änderungen warten') + ' auf Verbindung'; art = 'offline'; }
+    else if (offline) { t = 'Offline – Anzeige vom ' + (geladenAm ? hhmm(new Date(geladenAm)) + ' Uhr' : 'letzten Abruf'); art = 'offline'; }
+    else if (n) { t = '⏳ ' + n + (n === 1 ? ' Änderung wird' : ' Änderungen werden') + ' übertragen …'; art = 'offline'; }
+    el.textContent = t; el.className = art; el.style.display = t ? 'block' : 'none';
   }
 
   // ---------------------------------------------------------------- Uhr
@@ -377,8 +469,8 @@
       '<label class="f">Projekt</label><select id="bProj">' + projOpt.map(p => '<option value="' + h(p.id) + '"' + (p.id === s.projektId ? ' selected' : '') + '>' + h((p.nummer ? p.nummer + ' · ' : '') + p.name) + '</option>').join('') + '</select>' +
       '<label class="f">Datum</label><input type="date" id="bDatum" value="' + h(s.datum) + '">' +
       '<label class="f">Arbeitszeiten</label><div id="bZeiten"></div><div class="chips"><button class="chip" id="bPlus">+ Zeitraum</button></div>' +
-      '<div class="zwei"><div><label class="f">Pause (Min.)</label><input id="bPause" inputmode="numeric" value="' + h(s.pauseMin || '') + '" placeholder="0"></div>' +
-      '<div><label class="f">Dauer (h:mm)</label><input id="bStd" inputmode="decimal" value="' + h(fmtStd(s.stunden)) + '"></div></div>' +
+      '<div class="zwei"><div><label class="f">Pause</label><input id="bPause" class="uhrzeit dauer" readonly inputmode="none" data-titel="Pause" value="' + h(s.pauseMin ? fmtMin(s.pauseMin) : '') + '" placeholder="0:00"></div>' +
+      '<div><label class="f">Dauer</label><input id="bStd" class="uhrzeit dauer" readonly inputmode="none" data-titel="Dauer" value="' + h(fmtStd(s.stunden)) + '"></div></div>' +
       '<div class="klein" id="bHinweis"></div>' +
       '<label class="f">Beschreibung</label><textarea id="bBeschr" placeholder="Was wurde gemacht?">' + h(s.beschreibung || '') + '</textarea>' +
       '<label class="check">Ortstermin (Anfahrt)<input type="checkbox" id="bOrt"' + (s.ortstermin ? ' checked' : '') + '></label>' +
@@ -397,7 +489,7 @@
     };
     const aktualisiere = () => {
       if (zeiten.length) {
-        const t = { zeiten: zeiten.filter(z => z.von && z.bis), pauseMin: +ov.querySelector('#bPause').value || 0 };
+        const t = { zeiten: zeiten.filter(z => z.von && z.bis), pauseMin: pauseAus(ov.querySelector('#bPause').value) };
         ov.querySelector('#bStd').value = fmtStd(stundenAusZeiten(t));
         ov.querySelector('#bHinweis').textContent = 'Dauer aus den Arbeitszeiten (auf 5 Minuten gerundet)';
       } else ov.querySelector('#bHinweis').textContent = '';
@@ -410,13 +502,13 @@
       const neu = Object.assign({}, s, { projektId: ov.querySelector('#bProj').value, datum: ov.querySelector('#bDatum').value, beschreibung: ov.querySelector('#bBeschr').value.trim(), ortstermin: ov.querySelector('#bOrt').checked });
       const z = zeiten.filter(x => x.von || x.bis);
       if (z.some(x => isNaN(zeitMin(x.von)) || isNaN(zeitMin(x.bis)))) { toast('Bitte bei jedem Zeitraum Beginn und Ende eintragen.', true); return; }
-      const pause = +ov.querySelector('#bPause').value || 0;
+      const pause = pauseAus(ov.querySelector('#bPause').value);
       if (z.length || s.laeuft) { neu.zeiten = z; neu.pauseMin = pause; neu.stunden = stundenAusZeiten(neu); if (!pause) delete neu.pauseMin; }
       else { delete neu.zeiten; delete neu.pauseMin; neu.stunden = parseStd(ov.querySelector('#bStd').value); }
       if (!neu.laeuft && !(neu.stunden > 0 && neu.stunden <= 24)) { toast('Die Dauer muss zwischen 0:05 und 24:00 liegen.', true); return; }
       if (!neu.datum) { toast('Bitte ein Datum wählen.', true); return; }
       const btn = ov.querySelector('#bSpeichern'); btn.disabled = true;
-      try { await speichere(neu, s); ov.remove(); toast('Gespeichert'); render(); } catch (e) { toast(e.message, true); btn.disabled = false; }
+      try { await speichere(neu, s); ov.remove(); toast(warte[neu.id] && !warte[neu.id].konflikt ? 'Auf dem Handy gespeichert – wird übertragen, sobald Verbindung besteht' : 'Gespeichert'); render(); } catch (e) { toast(e.message, true); btn.disabled = false; }
     };
     ov.querySelector('#bLoeschen').onclick = async () => {
       if (!confirm('Diesen Eintrag löschen?')) return;
@@ -426,35 +518,37 @@
 
   // ---------------------------------------------------------------- Uhrzeit-Auswahl (Zifferblatt: erst Stunde, dann Minute)
   function uhrWaehlen(input) {
-    const start = zeitMin(input.value);
+    const dauer = input.classList.contains('dauer');   // Dauer/Pause: Stunden 0–23 statt Uhrzeit
     const jetzt = new Date();
+    const start = dauer ? (parseStd(input.value) > 0 ? Math.round(parseStd(input.value) * 60) : 0) : zeitMin(input.value);
     let std = !isNaN(start) ? Math.floor(start / 60) : jetzt.getHours();
     let min = !isNaN(start) ? start % 60 : Math.round(jetzt.getMinutes() / 5) * 5 % 60;
-    let modus = 'std';
+    if (dauer) std = Math.min(std, 23);
+    let modus = (dauer && input.dataset.titel === 'Pause') ? 'min' : 'std';
     const titel = input.dataset.titel || 'Uhrzeit';
     const ov = document.createElement('div'); ov.className = 'uhrwahl';
     ov.innerHTML = '<div class="box"><div class="titel"></div><div class="anzeige"><button data-m="std"></button><span>:</span><button data-m="min"></button></div>' +
       '<svg width="260" height="260" viewBox="0 0 260 260"></svg>' +
-      '<div class="knoepfe"><button data-a="jetzt">Jetzt</button><span><button data-a="ab">Abbrechen</button><button data-a="ok">OK</button></span></div></div>';
+      '<div class="knoepfe"><button data-a="jetzt">' + (dauer ? 'Keine' : 'Jetzt') + '</button><span><button data-a="ab">Abbrechen</button><button data-a="ok">OK</button></span></div></div>';
     ov.querySelector('.titel').textContent = String(titel).trim() || 'Uhrzeit';
     const svg = ov.querySelector('svg');
     const C = 130, R_AUSSEN = 104, R_INNEN = 68;
     const pos = (i, r) => { const w = (i / 12) * 2 * Math.PI - Math.PI / 2; return [C + r * Math.cos(w), C + r * Math.sin(w)]; };
     function zeichne() {
-      ov.querySelector('[data-m="std"]').textContent = pad(std);
+      ov.querySelector('[data-m="std"]').textContent = dauer ? String(std) : pad(std);
       ov.querySelector('[data-m="min"]').textContent = pad(min);
       ov.querySelectorAll('.anzeige button').forEach(b => b.classList.toggle('an', b.dataset.m === modus));
       let x = '<circle cx="' + C + '" cy="' + C + '" r="126" fill="#eceae5"/>';
       let zeiger;
       if (modus === 'std') {
-        const innen = std === 0 || std > 12;
+        const innen = dauer ? std >= 12 : (std === 0 || std > 12);
         zeiger = pos(std % 12, innen ? R_INNEN : R_AUSSEN);
         x += '<line x1="' + C + '" y1="' + C + '" x2="' + zeiger[0] + '" y2="' + zeiger[1] + '" stroke="#1f4e79" stroke-width="2"/><circle cx="' + C + '" cy="' + C + '" r="4" fill="#1f4e79"/><circle cx="' + zeiger[0] + '" cy="' + zeiger[1] + '" r="19" fill="#1f4e79"/>';
         for (let i = 0; i < 12; i++) {
-          const a = i === 0 ? 12 : i, b = i === 0 ? 0 : i + 12;
+          const a = dauer ? i : (i === 0 ? 12 : i), b = dauer ? i + 12 : (i === 0 ? 0 : i + 12);
           const [ax, ay] = pos(i, R_AUSSEN), [bx, by] = pos(i, R_INNEN);
-          x += '<text x="' + ax + '" y="' + ay + '" text-anchor="middle" dominant-baseline="central" font-size="17" fill="' + (std === a ? '#fff' : '#1d1d1b') + '">' + a + '</text>';
-          x += '<text x="' + bx + '" y="' + by + '" text-anchor="middle" dominant-baseline="central" font-size="14" fill="' + (std === b ? '#fff' : '#5c5b56') + '">' + pad(b) + '</text>';
+          x += '<text x="' + ax + '" y="' + ay + '" text-anchor="middle" dominant-baseline="central" font-size="17" fill="' + (std === a ? '#fff' : '#1d1d1b') + '">' + (dauer ? a + ' h' : a) + '</text>';
+          x += '<text x="' + bx + '" y="' + by + '" text-anchor="middle" dominant-baseline="central" font-size="14" fill="' + (std === b ? '#fff' : '#5c5b56') + '">' + (dauer ? b : pad(b)) + '</text>';
         }
       } else {
         zeiger = pos(min / 5, R_AUSSEN);
@@ -475,7 +569,7 @@
       if (modus === 'std') {
         const i = Math.round(w / (2 * Math.PI) * 12) % 12;
         const innen = abst < (R_AUSSEN + R_INNEN) / 2;
-        std = innen ? (i === 0 ? 0 : i + 12) : (i === 0 ? 12 : i);
+        std = dauer ? (innen ? i + 12 : i) : (innen ? (i === 0 ? 0 : i + 12) : (i === 0 ? 12 : i));
       } else {
         min = (Math.round(w / (2 * Math.PI) * 12) % 12) * 5;   // 5-Minuten-Schritte
       }
@@ -493,14 +587,14 @@
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     };
-    ov.querySelector('[data-a="ok"]').onclick = () => fertig(pad(std) + ':' + pad(min));
+    ov.querySelector('[data-a="ok"]').onclick = () => fertig(dauer ? (std || min ? std + ':' + pad(min) : '') : pad(std) + ':' + pad(min));
     ov.querySelector('[data-a="ab"]').onclick = () => fertig();
-    ov.querySelector('[data-a="jetzt"]').onclick = () => { const d = new Date(); std = d.getHours(); min = d.getMinutes(); modus = 'min'; zeichne(); };
+    ov.querySelector('[data-a="jetzt"]').onclick = () => { if (dauer) return fertig(''); const d = new Date(); std = d.getHours(); min = d.getMinutes(); modus = 'min'; zeichne(); };
     ov.addEventListener('click', e => { if (e.target === ov) fertig(); });
     zeichne();
     document.body.appendChild(ov);
   }
-  document.addEventListener('click', e => { const i = e.target.closest && e.target.closest('input.uhrzeit'); if (i) { e.preventDefault(); i.blur(); uhrWaehlen(i); } });
+  document.addEventListener('click', e => { const i = e.target.closest && e.target.closest('input.uhrzeit'); if (i && !i.disabled) { e.preventDefault(); i.blur(); uhrWaehlen(i); } });
 
   // ---------------------------------------------------------------- Ansichten
   function renderZeiten() {
@@ -547,9 +641,9 @@
       '<label class="f">Datum</label><input type="date" id="nDatum" value="' + heute() + '" max="' + heute() + '">' +
       '<div class="chips"><button class="chip' + (nachtragModus === 'dauer' ? ' an' : '') + '" data-modus="dauer">Dauer</button><button class="chip' + (nachtragModus === 'zeit' ? ' an' : '') + '" data-modus="zeit">von – bis</button></div>' +
       (nachtragModus === 'dauer'
-        ? '<label class="f">Dauer (h:mm)</label><input id="nStd" inputmode="decimal" placeholder="z. B. 2:30"><div class="chips">' + ['0:30', '1:00', '2:00', '3:00', '4:00', '8:00'].map(x => '<button class="chip" data-dauer="' + x + '">' + x + '</button>').join('') + '</div>'
+        ? '<label class="f">Dauer</label><input id="nStd" class="uhrzeit dauer" readonly inputmode="none" data-titel="Dauer" placeholder="z. B. 2:30"><div class="chips">' + ['0:30', '1:00', '2:00', '3:00', '4:00', '8:00'].map(x => '<button class="chip" data-dauer="' + x + '">' + x + '</button>').join('') + '</div>'
         : '<div class="zwei"><div><label class="f">von</label><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Beginn" id="nVon"></div><div><label class="f">bis</label><input class="uhrzeit" readonly inputmode="none" placeholder="--:--" data-titel="Ende" id="nBis"></div></div>' +
-          '<div class="zwei"><div><label class="f">Pause (Min.)</label><input id="nPause" inputmode="numeric" placeholder="0"></div><div><label class="f">Dauer</label><input id="nSumme" disabled></div></div>') +
+          '<div class="zwei"><div><label class="f">Pause</label><input id="nPause" class="uhrzeit dauer" readonly inputmode="none" data-titel="Pause" placeholder="0:00"></div><div><label class="f">Dauer</label><input id="nSumme" disabled></div></div>') +
       '<label class="f">Beschreibung</label><textarea id="nBeschr" placeholder="Was wurde gemacht?"></textarea>' +
       '<label class="check">Ortstermin (Anfahrt)<input type="checkbox" id="nOrt"></label>' +
       '<button class="haupt" id="nOk">Erfassen</button></div>';
@@ -557,7 +651,7 @@
   function bindeNachtragen() {
     document.querySelectorAll('[data-modus]').forEach(b => b.onclick = () => { nachtragModus = b.dataset.modus; ls.set('modus', nachtragModus); render(); });
     document.querySelectorAll('[data-dauer]').forEach(b => b.onclick = () => { $('nStd').value = b.dataset.dauer; document.querySelectorAll('[data-dauer]').forEach(x => x.classList.toggle('an', x === b)); });
-    const summe = () => { if (!$('nSumme')) return; const t = { zeiten: [{ von: $('nVon').value, bis: $('nBis').value }], pauseMin: +$('nPause').value || 0 }; $('nSumme').value = $('nVon').value && $('nBis').value ? fmtStd(stundenAusZeiten(t)) : ''; };
+    const summe = () => { if (!$('nSumme')) return; const t = { zeiten: [{ von: $('nVon').value, bis: $('nBis').value }], pauseMin: pauseAus($('nPause').value) }; $('nSumme').value = $('nVon').value && $('nBis').value ? fmtStd(stundenAusZeiten(t)) : ''; };
     ['nVon', 'nBis', 'nPause'].forEach(id => { if ($(id)) $(id).oninput = summe; });
     if (!$('nOk')) return;
     $('nOk').onclick = async () => {
@@ -565,14 +659,14 @@
       if (nachtragModus === 'zeit') {
         const von = $('nVon').value, bis = $('nBis').value;
         if (isNaN(zeitMin(von)) || isNaN(zeitMin(bis))) { toast('Bitte Beginn und Ende eintragen.', true); return; }
-        rec.zeiten = [{ von, bis }]; const p = +$('nPause').value || 0; if (p) rec.pauseMin = p;
+        rec.zeiten = [{ von, bis }]; const p = pauseAus($('nPause').value); if (p) rec.pauseMin = p;
         rec.stunden = stundenAusZeiten(rec);
       } else rec.stunden = parseStd($('nStd').value);
       if (!(rec.stunden > 0 && rec.stunden <= 24)) { toast('Bitte eine Dauer zwischen 0:05 und 24:00 eintragen (z. B. 2:30).', true); return; }
       if (!rec.datum) { toast('Bitte ein Datum wählen.', true); return; }
       if (!rec.beschreibung) { toast('Bitte eine Beschreibung eintragen.', true); return; }
       $('nOk').disabled = true;
-      try { await speichere(rec, null); ls.set('letztesProjekt', rec.projektId); toast(fmtStd(rec.stunden) + ' h erfasst – ' + projektName(rec.projektId)); render(); }
+      try { await speichere(rec, null); ls.set('letztesProjekt', rec.projektId); toast(fmtStd(rec.stunden) + ' h erfasst – ' + projektName(rec.projektId) + (warte[rec.id] ? ' (wird übertragen, sobald Verbindung besteht)' : '')); render(); }
       catch (e) { toast(e.message, true); $('nOk').disabled = false; }
     };
   }
@@ -681,6 +775,7 @@
     if (tab === 'zeiten') main.innerHTML = renderZeiten();
     else if (tab === 'nachtragen') { main.innerHTML = renderNachtragen(); bindeNachtragen(); }
     else main.innerHTML = renderListe();
+    aktualisiereStatus();
     main.insertAdjacentHTML('beforeend', '<footer class="ver">Version ' + VERSION + (geladenAm ? ' · aktualisiert ' + hhmm(new Date(geladenAm)) : '') + '</footer>');
   }
   // Klicks in der Hauptansicht
@@ -704,27 +799,42 @@
   });
   document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => { tab = b.dataset.tab; ls.set('tab', tab); render(); });
   $('einst').onclick = () => { if (cfg.pw && cfg.maId) renderEinstellungen(); };
-  $('neuladen').onclick = async () => { if (!cfg.pw || !cfg.maId) return; $('neuladen').disabled = true; try { await ladeAlles(); render(); toast('Aktualisiert'); } catch (e) { /* Meldung kam schon */ } $('neuladen').disabled = false; };
+  $('neuladen').onclick = async () => { if (!cfg.pw || !cfg.maId) return; $('neuladen').disabled = true; await synchronisiere(); try { await ladeAlles(); render(); toast('Aktualisiert'); } catch (e) { render(); if (e.offline) toast('Keine Verbindung – Anzeige vom letzten Abruf.', true); } $('neuladen').disabled = false; };
   // laufende Uhren hochzählen
   setInterval(() => {
     document.querySelectorAll('.uhr[data-lauf]').forEach(u => { if (!u.dataset.lauf) return; const sek = +u.dataset.basis + Math.max(0, (Date.now() - new Date(u.dataset.lauf).getTime()) / 1000); u.innerHTML = uhrText(sek, true); });
   }, 1000);
-  // beim Zurückkehren in die App aktualisieren (andere Geräte, PC)
-  document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState !== 'visible' || !cfg.pw || !cfg.maId || document.querySelector('.ov')) return;
-    if (Date.now() - geladenAm < 20000) { render(); return; }
-    try { await ladeAlles(true); render(); await pruefeVergessene(); } catch (e) { render(); }
-  });
+  // beim Zurückkehren in die App aktualisieren (andere Geräte, PC) und Warteschlange senden
+  async function auffrischen() {
+    if (!cfg.pw || !cfg.maId) return;
+    await synchronisiere(true);
+    if (document.querySelector('.ov')) return;
+    try { await ladeAlles(true); } catch (e) { /* offline: Anzeige aus dem Speicher */ }
+    render(); await pruefeVergessene();
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') auffrischen(); });
+  window.addEventListener('online', () => auffrischen());
+  window.addEventListener('offline', () => { offline = true; aktualisiereStatus(); });
+  setInterval(() => { if (anzahlWartend() && document.visibilityState === 'visible') synchronisiere(true); }, 30000);
+  $('status').onclick = () => { const k = Object.keys(warte).find(x => warte[x].konflikt); if (k) zeigeKonflikt(k); else if (anzahlWartend()) synchronisiere(); };
 
   async function start() {
     if (!cfg.pw || !cfg.uid || !(cfg.pfad || []).length || !cfg.maId) return render();
+    warteUeberlagern();
     render();
+    await synchronisiere(true);
     try { await ladeAlles(); } catch (e) { if (e.auth) return renderEinrichtung('login'); }
-    if (!ich()) { cfg.maId = ''; ls.set('cfg', cfg); return renderEinrichtung('mitarbeiter'); }
+    if (!ich()) { if (offline) return render(); cfg.maId = ''; ls.set('cfg', cfg); return renderEinrichtung('mitarbeiter'); }
     render();
     await pruefeVergessene();
   }
-  window.__zeit = { cfg: () => cfg, cache: () => cache, stundenAusZeiten, parseStd, fmtStd };
+  // Offline-Fähigkeit: App-Dateien auf dem Handy ablegen; Speicher möglichst dauerhaft
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* ohne Offline-Start weiter nutzbar */ });
+    navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'neue-version') toast('Neue Version geladen – wird beim nächsten Öffnen verwendet.'); });
+  }
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  window.__zeit = { cfg: () => cfg, cache: () => cache, warte: () => warte, stundenAusZeiten, parseStd, fmtStd };
   start();
 })();
 </script>
