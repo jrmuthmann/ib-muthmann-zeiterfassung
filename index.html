@@ -37,12 +37,12 @@
 </style>
 </head>
 <body>
-<header>Stunden-App · Verbindungstest</header>
+<header>Stunden-App · Verbindungstest <span style="font-weight:400;font-size:12px;opacity:.75">v3</span></header>
 <main>
   <section class="karte" id="anmeldung">
     <h2>1. Anmeldung an der Nextcloud</h2>
     <label for="url">Nextcloud-Adresse</label>
-    <input id="url" type="url" placeholder="https://nx103308.your-storageshare.de" autocomplete="url" autocapitalize="off">
+    <input id="url" type="url" value="https://nx103308.your-storageshare.de" autocomplete="url" autocapitalize="off">
     <label for="nutzer">Benutzername oder E-Mail-Adresse</label>
     <input id="nutzer" autocomplete="username" autocapitalize="off" autocorrect="off">
     <label for="pw">App-Passwort</label>
@@ -67,7 +67,7 @@
     <button class="zweit" id="nochmal">Erneut testen</button>
   </section>
 
-  <p class="klein">Diese Testseite speichert nichts dauerhaft. Sie liest Ordner und Projekte und legt im Ordner <b>_signal</b> kurz eine Testdatei an, die sofort wieder gelöscht wird.</p>
+  <p class="klein">Diese Testseite merkt sich auf dem Handy nur Adresse und Benutzername (kein Passwort). Sie liest Ordner und Projekte und legt im Ordner <b>_signal</b> kurz eine Testdatei an, die sofort wieder gelöscht wird.</p>
 </main>
 <script>
 (function () {
@@ -107,6 +107,7 @@
   }
 
   // ---------------------------------------------------------------- Anmeldung
+  try { const n = localStorage.getItem('stunden.nutzer'); if (n) $('nutzer').value = n; const u = localStorage.getItem('stunden.url'); if (u) $('url').value = u; } catch (e) { /* egal */ }
   $('verbinden').onclick = async () => {
     const url = $('url').value.trim().replace(/\/+$/, '');
     const nutzer = $('nutzer').value.trim(), pw = $('pw').value.trim();
@@ -117,6 +118,7 @@
       // Anmeldename (z. B. E-Mail-Adresse) und interne Benutzerkennung können verschieden sein:
       // die Kennung für den Dateipfad fragt die Seite bei der Nextcloud ab.
       const uid = await benutzerKennung(url);
+      try { localStorage.setItem('stunden.nutzer', nutzer); localStorage.setItem('stunden.url', url); } catch (e) { /* egal */ }
       basis = url + '/remote.php/dav/files/' + encodeURIComponent(uid || nutzer) + '/';
       $('kennung').textContent = uid ? 'Angemeldet als ' + nutzer + (uid !== nutzer ? ' (Nextcloud-Kennung: ' + uid + ')' : '') : '';
       pfad = [];
