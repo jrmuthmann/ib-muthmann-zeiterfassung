@@ -1,6 +1,6 @@
 /* Zeiterfassung · Ingenieurbüro Muthmann – Offline-Ablage der App-Dateien.
    Nur die eigenen Dateien (gleiche Adresse) werden zwischengespeichert, nie Daten aus der Nextcloud. */
-const CACHE = 'zeiten-1.2.0';
+const CACHE = 'zeiten-1.2.1';
 const DATEIEN = ['./', 'index.html', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -113,7 +113,7 @@
 <script>
 (function () {
   'use strict';
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const STANDARD_URL = 'https://nx103308.your-storageshare.de';
   const TAGE_LISTE = 62;          // so weit zurück werden eigene Einträge geladen
   const MAX_LAUF_STD = 10;        // länger laufende Uhren: nachfragen
@@ -150,7 +150,7 @@
   };
   const zeitenText = s => (s.zeiten || []).map(z => z.von + '–' + z.bis).join(', ') + (s.laeuft ? ((s.zeiten || []).length ? ', ' : '') + hhmm(new Date(s.laeuft.seit)) + '–läuft' : '');
   const laufSek = s => s.laeuft ? Math.max(0, (Date.now() - new Date(s.laeuft.seit).getTime()) / 1000) : 0;
-  const abgerechnet = s => !!(s.rechnungId || s.abschlagId);
+  const abgerechnet = s => !!(s.rechnungId || s.abschlagId || s.pauschalId);   // auch „mit Pauschale abgegolten“
 
   function toast(text, fehler) {
     const t = $('toast'); t.firstChild.textContent = text; t.firstChild.className = fehler ? 'fehler' : ''; t.style.display = 'block';
